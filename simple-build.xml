@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project name="winkle" default="build-jar">
+
+    <property name="project.home" value="~/documents/projects/winkle" />
+    <property name="libs.home" value="~/documents/development/javalibs" />
+    <property name="src.dir" value="${project.home}/src" />
+    <property name="build.dir" value="${project.home}/bin" />
+    <property name="dist.dir" value="~/documents/development/distributions"/>
+
+    <path id="classpath">
+        <!-- test-related stuff -->
+        <pathelement location="${libs.home}/junit-4.11.jar"/>
+        <pathelement location="${libs.home}/junit.jar"/>
+        <pathelement location="${libs.home}/mockito-all-1.9.5.jar"/>
+        <pathelement location="${libs.home}/Notes.jar"/>
+    </path>
+
+    <target name="clean">
+        <delete includeemptydirs="true">
+            <fileset dir="${build.dir}" includes="**/*"/>
+            <fileset dir="${dist.dir}" includes="**/*"/>
+        </delete>
+    </target>
+
+    <target name="compile" depends="clean">
+        <javac srcdir="${src.dir}" destdir="${build.dir}" source="1.6">
+            <classpath refid="classpath"/>
+        </javac>
+    </target>
+
+    <target name="build-jar" depends="compile">
+        <!--
+            exlude any test classes by reference to their name, e.g. 'MyWinkleTest.class'
+            (I usually store in a separate src folder but YMMV)
+        -->
+        <jar destfile="${dist.dir}/my-brill-code.jar" basedir="${build.dir}" excludes="**/*Test.class"/>
+    </target>
+
+</project>
