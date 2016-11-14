@@ -1,0 +1,1267 @@
+'----------------------------------------------------------------------
+' Export To Excel 2.0 - last modified May 23rd, 2002
+' written by Ken Pespisa (kpespisa@attbi.com)
+' copyright 2002
+'----------------------------------------------------------------------
+Option Public
+Option Declare
+Dim w As NotesUIWorkspace
+Dim s As NotesSession
+Dim db As NotesDatabase
+Dim dc As NotesDocumentCollection
+Dim docProfile As NotesDocument
+Dim docExportProfile As NotesDocument
+Dim view As NotesView
+Dim form As NotesForm
+Dim excelNewWkbk As Variant
+Dim excelSheet As Variant
+Dim excelApp As Variant
+Dim vtFileName As Variant
+Dim vtColumns As Variant
+Dim vtColumnOrder As Variant
+Dim vtColumnNames As Variant
+Dim arrColumnNames() As String
+Dim sSourceType As String
+Dim sSourceName As String
+Dim x As Integer
+Dim y As Integer
+Dim iNumColumns As Integer
+Dim iCount As Integer
+Dim iSortBy1 As Integer
+Dim iSortBy2 As Integer
+Dim iSortBy3 As Integer
+Dim iNumSortColumns As Integer
+Dim iSelectedOnly As Integer
+Dim iGroupFirstColumn As Integer
+Dim iTabFirstColumn As Integer
+Dim iCurrentViewExists As Integer
+Dim iSelectDistinct As Integer
+Dim iUseDefaults As Integer
+
+'Error Constants
+Public Const ErrOLEException = 213
+
+'Excel Automation Constants
+Const XLYES = 1
+Const EXCEL_XLDOWN = -4121
+Const EXCEL_XLSOLID = 1
+Const XLSHEETVISIBLE = -1
+Const XLWORKSHEET = -4167
+
+'Default Export Option variables
+Dim sMultiValueSeparator As String
+Dim dWorksheetRowHeight As Double
+Dim dMaximumColumnWidth As Double
+Dim iPromptForSelectedExportType As Integer
+Const CURRENTVIEW_TYPE = "0"
+Const VIEW_TYPE = "1"
+Const FORM_TYPE = "2"
+Const MULTI_VALUE_SEPARATOR = ", "
+Const SHEET_ROWHEIGHT = 13.5
+Const MAX_COLUMN_WIDTH = 50
+Const PROMPT_FOR_SELECTED_EXPORT_TYPE = False
+
+Public Function StripJunk(myText As String) As String
+
+     'Function to return a string without unnecessary
+     'characters or words, as defined in the junkList array.
+
+	'This function is used to make sure the name of a tab (sheet) in
+	'excel is valid
+
+	If myText = "" Then Exit Function
+
+	Dim junkList() As String
+	Dim newText As String
+
+	ReDim junkList(6)
+	junkList(0) = ":"
+	junkList(1) = "\"
+	junkList(2) = "/"
+	junkList(3) = "?"
+	junkList(4) = "*"
+	junkList(5) = "["
+	junkList(6) = "]"
+
+	Dim nextPosition As Integer
+	Dim currentPosition As Integer
+	Dim distance As Integer
+	Dim lengthText As Integer
+	Dim testBit As Integer
+
+	currentPosition = 1
+	newText = myText
+	testBit = Asc(Right(myText, 1))
+
+	For X = 0 To UBound(junkList) - 1
+
+		Do
+			nextPosition = InStr(currentPosition, newText, junkList(X), 5)
+			If nextPosition = 0 Then
+				Exit Do
+			End If
+
+			newText = Left(newText, nextPosition - 1) & Right(newText, (Len(newText) - nextPosition) - (Len(junkList(X)) - 1))
+
+			currentPosition = nextPosition
+
+		Loop
+
+		currentPosition = 1
+
+	Next
+
+	StripJunk = newText
+
+End Function
+Sub DoFormExport()
+
+	Dim lngCount As Long
+	Dim lngTotal As Long
+	Dim doc As NotesDocument
+	Dim arrCellValues() As Variant
+	Dim vtColumnvalue As Variant
+
+	On Error GoTo DoExportErrorTrap
+
+	'-----------------------------------------------------------------
+	' Subroutine that exports data from view to Excel.
+	'-----------------------------------------------------------------
+
+	'Insert Titles
+	For x = 0 To iNumColumns - 1
+		excelSheet.Cells(1, x + 1).value = vtColumnNames(x)
+	Next
+
+
+	'-----------------------------------------------------------------
+	' Start export.  Get total number of entries for use in
+	' UpdateStatusBar function.
+	'-----------------------------------------------------------------
+	lngCount = 2  'First Document starts at row 2
+	Dim ndt As New NotesDateTime("01/01/1980")
+	Set dc = db.Search(|Form = "| & form.Name & |"|, ndt, 0)
+	Set doc = dc.GetFirstDocument
+
+	'Get total number of entries
+	lngTotal = dc.Count
+
+	'-----------------------------------------------------------------
+
+	'-----------------------------------------------------------------
+	While Not (doc Is Nothing)
+		Call UpdateStatusBar(lngCount - 1, lngTotal)
+
+		'Redimension array to hold next row (clear old values)
+		ReDim arrCellValues(iNumColumns - 1)
+
+
+		'Loop through all fields in document
+		For x = 0 To iNumColumns - 1
+
+			If doc.HasItem(vtColumnNames(x)) Then
+
+				'Set column value to variant in case it is multi-value.
+				vtColumnValue = doc.GetItemValue(vtColumnNames(x))
+
+				'If column has multi-values, concatenate all values before export.
+				If IsArray(vtColumnValue) Then
+					For y = 0 To UBound(vtColumnValue)
+						If y > 0 Then
+							arrCellValues(x) = arrCellValues(x) & sMultiValueSeparator & vtColumnValue(y)
+						Else
+							arrCellValues(x) = vtColumnValue(y)
+						End If
+					Next
+				Else
+					arrCellValues(x) = vtColumnValue
+				End If
+
+			Else
+				arrCellValues(x) = ""
+			End If
+
+		Next
+
+		'Export row to excel.
+		excelSheet.Range(excelSheet.Cells(lngCount, 1), _
+		excelSheet.Cells(lngCount, iNumColumns)).value = arrCellValues
+
+
+		'Update count of processed view entries.
+		lngCount = lngCount + 1
+
+		Set doc = dc.GetNextDocument(doc)
+
+	Wend
+
+	Exit Sub
+
+DoExportErrorTrap:
+
+	MsgBox "ERROR on line " & CStr(Erl) & " (" & CStr(Err) & ") - " & Error$
+	Exit Sub
+
+End Sub
+Sub ExportViewToExcel(sType As String)
+
+	'-----------------------------------------------------------------
+	' Main script for exporting a view to Excel.
+	'
+	' The script determines the mode selected.  It can either be all
+	' documents in view, or just selected documents.  Then the user
+	' may be prompted to export the current view or a customized view.
+	' You can turn off that prompt using the PROMPT_FOR_CUSTOM_VIEW
+	' constant found below.
+	'
+	' Once the view is chosen, the script determines the view column
+	' order.  It skips hidden columns, response columns, and columns
+	' with formulas equal to "".  If customizable view is chosen, the
+	' user can select which columns to export, the order to export them,
+	' and what sort order they're given.
+	'-----------------------------------------------------------------
+
+	On Error GoTo ErrorTrap
+
+	Dim taskID As Integer
+	Dim sRun As String
+	Dim sResponse As String
+	Dim arrColumnOrder() As Integer
+
+	Set s = New NotesSession
+	Set w = New NotesUIWorkspace
+	Set db = s.CurrentDatabase
+
+	'Get Export Options Document
+	Call GetExportOptions()
+
+	'Get Current View
+	If w.CurrentView Is Nothing Then
+		iCurrentViewExists = False
+	Else
+		iCurrentViewExists = True
+		Set view = w.CurrentView.View
+	End If
+
+	'If Custom Export chosen, prompt user for which source to use.
+	If sType = "Custom" Then
+		sResponse = GetExportSource
+		If sResponse = "" Then Exit Sub
+	Else
+		If Not iCurrentViewExists Then
+			MsgBox "Unable to export view because no view found.  This may" & _
+			" occur if the current view is an embedded view.", 16, "Unable to Export"
+			Exit Sub
+		Else
+			sResponse = "Current View -- " & view.Name & Space(150) & "$$$" & "0" & view.Name
+		End If
+	End If
+
+	'Determine type of source chosen by user and get columns
+	sSourceType = Left(StrRightBack(sResponse, "$$$"), 1)
+	Select Case sSourceType
+	Case CURRENTVIEW_TYPE:
+		'we already have the view
+		sSourceName = view.Name
+
+	Case VIEW_TYPE:
+		'Get the view from current database
+		Set view = db.GetView(StrRightBack(sResponse, "$$$" & sSourceType))
+		sSourceName = view.Name
+
+	Case FORM_TYPE:
+		'Export based on Form.  Get form from current database
+		Set form = db.GetForm(StrRightBack(sResponse, "$$$" & sSourceType))
+		sSourceName = form.Name
+
+	End Select
+
+
+	'Get columns that can be exported based from the source
+	vtColumns = GetColumnsFromSource()
+
+
+	If sType = "Custom" Then  'custom export
+
+		'Allow user to customize what columns are exported and in what order.
+		vtColumnOrder = CustomizeExport
+		If IsEmpty(vtColumnOrder) Then Exit Sub
+
+		'Get number of columns
+		iNumColumns = UBound(vtColumnOrder) + 1
+
+		'Get Array of Column Titles in custom order
+		ReDim vtColumnNames(iNumColumns - 1)
+		For x = 0 To iNumColumns - 1
+			vtColumnNames(x) = Trim(StrLeft(arrColumnNames(vtColumnOrder(x)), "$$$"))
+		Next
+
+	Else  'current view, either all or selected
+
+		'Get order that columns will be exported in
+		iCount = 0
+		For x = 0 To UBound(vtColumns)
+			'Remove any hidden columns or columns that are icons
+			If Not (vtColumns(x).Ishidden Or vtColumns(x).IsIcon) Then
+				ReDim Preserve arrColumnOrder(iCount)
+				arrColumnOrder(iCount) = x    'set to export column
+				iCount = iCount + 1
+			End If
+		Next
+		vtColumnOrder = arrColumnOrder
+
+		'Get number of columns
+		iNumColumns = UBound(vtColumnOrder) + 1
+
+		'Disable sort
+		iNumSortColumns = 0
+
+		'Get Array of Column Titles
+		ReDim vtColumnNames(iNumColumns - 1)
+		For x = 0 To iNumColumns - 1
+			vtColumnNames(x) = vtColumns(vtColumnOrder(x)).Title
+		Next
+
+	End If
+
+	'Set selected only mode
+	iSelectedOnly = False
+	If sType = "Selected" Then
+		iSelectedOnly = True
+		Set dc = db.UnprocessedDocuments
+
+		If view.IsCategorized Then
+			If iPromptForSelectedExportType Then
+				x = MsgBox ("You have chosen to export selected documents only.  " & _
+				"In categorized views, documents may appear more than once under " & _
+				"different categories.  Would you like to export all occurances of " & _
+				"selected documents or just the first occurance?" & Chr(10) & Chr(10) & _
+				"If you'd like to export all occurances, choose (Yes)" & Chr(10) & _
+				"If you'd like to export only the first occurance, choose (No)" & Chr(10) & _
+				"If you are unsure, the recommended choice is (Yes).", 32 + 4, "Handling " & _
+				"Multiple Occurances of Selected Documents.")
+				If x = 7 Then
+					iSelectDistinct = True
+				End If
+			Else
+				iSelectDistinct = True
+			End If
+		End If
+	End If
+
+
+	'Create Excel Object and prompt user for workbook name
+	If CreateExcelObject = False Then
+		Exit Sub
+	End If
+
+
+	'Do Export
+	Select Case sSourceType
+	Case CURRENTVIEW_TYPE, VIEW_TYPE:
+		Call DoViewExport()
+	Case FORM_TYPE:
+		Call DoFormExport()
+	End Select
+
+
+	'Run sorting procedures
+	Print "Sorting Records..."
+	Select Case iNumSortColumns
+		'(Key1, Order1, Key2, Type, Order2, Key3, Order3, Header, _
+		'OrderCustom, MatchCase, Orientation, SortMethod)
+	Case 1:
+		Call excelSheet.UsedRange.Sort(excelSheet.Cells(1, iSortBy1), , _
+		, , , , , XLYES)
+	Case 2:
+		Call excelSheet.UsedRange.Sort(excelSheet.Cells(1, iSortBy1), , _
+		excelSheet.Cells(1, iSortBy2), , , , , XLYES)
+	Case 3:
+		Call excelSheet.UsedRange.Sort(excelSheet.Cells(1, iSortBy1), , _
+		excelSheet.Cells(1, iSortBy2), , , excelSheet.Cells(1, iSortBy3), , XLYES)
+	End Select
+
+	'Tidy Up by making title row bold and setting columns to autofit
+	Print "Formatting Spreadsheet..."
+	Call TidyUpSpreadsheet
+
+	'Format by Tab if necessary
+	If iTabFirstColumn Then
+		Call FormatByTab
+	End If
+
+	'Format by Group if necessary
+	If iGroupFirstColumn Then
+		Call FormatByGroup
+	End If
+
+	Print "Export Completed... Starting Excel"
+	excelApp.Visible = True
+
+	Exit Sub
+
+ErrorTrap:
+
+	MsgBox "ERROR on line " & CStr(Erl) & " (" & CStr(Err) & ") - " & Error$
+
+	'Quit
+	If IsObject(excelNewWkbk) Then
+		excelNewWkbk.Save
+		excelNewWkbk.Close
+	End If
+	If IsObject(excelApp) Then
+		excelApp.Quit
+	End If
+
+
+	Exit Sub
+
+End Sub
+
+Sub DoViewExport()
+
+	Dim lngCount As Long
+	Dim lngTotal As Long
+	Dim vn As NotesViewNavigator
+	Dim ve As NotesViewEntry
+	Dim vec As NotesViewEntryCollection
+	Dim arrCellValues() As Variant
+	Dim vtColumnvalue As Variant
+	Dim docTest As NotesDocument
+	Dim iFlattenView As Integer
+
+	On Error GoTo DoExportErrorTrap
+	On Error 9 GoTo SubscriptOutOfRangeTrap
+
+	'-----------------------------------------------------------------
+	' Subroutine that exports data from view to Excel.
+	'-----------------------------------------------------------------
+
+	'Insert Titles
+	For x = 0 To iNumColumns - 1
+		excelSheet.Cells(1, x + 1).value = vtColumnNames(x)
+	Next
+
+
+	'-----------------------------------------------------------------
+	' Start export.  Get total number of entries for use in
+	' UpdateStatusBar function.
+	'-----------------------------------------------------------------
+	lngCount = 2  'First Document starts at row 2
+	Set vn = view.CreateViewNav
+	Set vec = view.AllEntries
+
+	'Get total number of entries
+	If iSelectedOnly Then
+		lngTotal = dc.Count
+	Else
+		lngTotal = vec.Count
+		'Msgbox Cstr(lngTotal)
+	End If
+
+	'Check to see if we should flatten the view during export
+	If iGroupFirstColumn = True Or iTabFirstColumn = True Or iNumSortColumns > 0 Then
+		iFlattenView = True
+	End If
+
+
+	'-----------------------------------------------------------------
+	' Loop through all entries.  If we're in selected only mode, see
+	' if the current entry's document is part of the unprocessed
+	' documents collection.  If it is not, just skip that entry.
+	' For all other cases, process the view entry as follows:
+	'
+	' 	If entry is a category, output only the category column value
+	'    for that row.
+	'    If entry is a document, output all columns except any columns
+	'    that are categories
+	'    Skip all Total or Conflict type view entries. (code could be
+	'	added later)
+	'-----------------------------------------------------------------
+	Set ve = vn.GetFirst
+	While Not (ve Is Nothing)
+		Call UpdateStatusBar(lngCount - 1, lngTotal)
+
+		If iSelectedOnly Then
+			Set docTest = Nothing  'reset test doc.
+			If ve.IsDocument Then
+				Set docTest = dc.GetDocument(ve.Document)
+				If iSelectDistinct And Not docTest Is Nothing Then
+					'Removes document from documentcollection
+					'so that it won't be processed twice
+					Call dc.DeleteDocument(docTest)
+				End If
+			End If
+		End If
+
+		If iSelectedOnly And docTest Is Nothing Then
+			'Do Nothing
+		Else
+			'Redimension array to hold next row (clear old values)
+			ReDim arrCellValues(iNumColumns - 1)
+
+			Select Case -1
+			Case ve.IsCategory
+
+				'If user chose the group and/or tab formatting option and/or sorting options,
+				'we must flatten the view to make it work.
+				If Not iFlattenView Then
+
+					'Loop through possible multi-value category column
+					For x = 0 To UBound(ve.ColumnValues)
+
+						'If column isn't part of the selected list of columns to export
+						'(from Custom export only), then skip that column.  Otherwise
+						'add that column in the appropriate position.
+						If Not IsNull(ArrayGetIndex(vtColumnOrder, x)) Then
+							arrCellValues(ArrayGetIndex(vtColumnOrder, x)) = ve.ColumnValues(x)
+						End If
+					Next
+
+					'Export row to excel
+					excelSheet.Range(excelSheet.Cells(lngCount, 1), _
+					excelSheet.Cells(lngCount, iNumColumns)).value = arrCellValues
+
+					'Since the vec.count number doesn't include categories, we
+					'add one to the total entries so the status bar will update properly
+					lngTotal = lngTotal + 1
+
+				Else
+
+					'To flatten the view we must ignore this view entry
+					'and not export any data
+					lngCount = lngCount - 1
+
+				End If
+
+			Case ve.IsConflict
+				'skip
+
+			Case ve.IsTotal, ve.IsDocument
+
+				'Loop through all columns in view entry
+				For x = 0 To iNumColumns - 1
+
+					'If the column is a category then don't show the category in this row,
+					'unless we're in Selected Only mode.  In Selected Only mode, we must
+					'show the category or the category value won't make it to the export.
+					'Also, show the category on each row (thereby flattening the view) if
+					'user chose the group or tab formatting or sorting option.
+					If vtColumns(vtColumnOrder(x)).IsCategory And Not iSelectedOnly _
+					And Not iFlattenView Then
+						arrCellValues(x) = ""
+					Else
+						'Set column value to variant in case it is multi-value.
+						vtColumnValue = ve.ColumnValues(vtColumnOrder(x))
+
+						'If column has multi-values, concatenate all values before export.
+						If IsArray(vtColumnValue) Then
+							For y = 0 To UBound(vtColumnValue)
+
+								'Handle special case where dates before 1900 aren't allowed
+								'in Excel and would cause an error.
+								If IsDate(vtColumnValue(y)) Then
+									If vtColumnValue(y) < DateValue("01/01/1900") Then
+										vtColumnValue(y) = CStr(vtColumnValue(y))
+									End If
+								End If
+
+								If y > 0 Then
+									arrCellValues(x) = arrCellValues(x) & sMultiValueSeparator & vtColumnValue(y)
+								Else
+									arrCellValues(x) = vtColumnValue(y)
+								End If
+							Next
+						Else
+
+							'Handle special case where dates before 1900 aren't allowed
+							'in Excel and would cause an error.
+							If IsDate(vtColumnValue) Then
+								If vtColumnValue < DateValue("01/01/1900") Then
+									vtColumnValue = CStr(vtColumnValue)
+								End If
+							End If
+							arrCellValues(x) = vtColumnValue
+						End If
+
+					End If
+				Next
+
+				'Export row to excel.
+				excelSheet.Range(excelSheet.Cells(lngCount, 1), _
+				excelSheet.Cells(lngCount, iNumColumns)).value = arrCellValues
+
+				If ve.IsTotal Then
+					'Since the vec.count number doesn't include totals, we
+					'add one to the total entries so the status bar will update properly
+					lngTotal = lngTotal + 1
+				End If
+
+			End Select
+
+			'Update count of processed view entries.
+			lngCount = lngCount + 1
+
+		End If
+
+		'Exit if all selected documents have been processed
+		'and user chose to select distinct only.
+		If iSelectedOnly And iSelectDistinct Then
+			If dc.Count = 0 Then Exit Sub
+		End If
+
+		Set ve = vn.GetNext(ve)
+
+	Wend
+
+	Exit Sub
+
+DoExportErrorTrap:
+
+	MsgBox "ERROR on line " & CStr(Erl) & " (" & CStr(Err) & ") - " & Error$
+	Exit Sub
+
+SubscriptOutOfRangeTrap:
+
+	MsgBox "ERROR on line " & CStr(Erl) & " (" & CStr(Err) & ") - " & Error$ & _
+	Chr(10) & Chr(10) & "This error is most likely to occur when a column being " & _
+	"exported has a formula that contains a constant value, such as a single " & _
+	"string.  If you wish to export a constant value, you need to trick Notes " & _
+	"into thinking it is not a constant value by adding a dummy variable in your " & _
+	" formula, such as ""String"" + dummyvar."
+	Exit Sub
+
+End Sub
+Function GetExportSource() As String
+
+	Print "Getting Source of Export..."
+
+	GetExportSource = ""
+
+	Dim arrExportSources() As String
+	Dim docCustomExport As NotesDocument
+	iCount = 0
+
+	If iCurrentViewExists Then
+		ReDim arrExportSources(iCount)
+		arrExportSources(iCount) = "Current View -- " & view.Name & Space(150) & "$$$" & _
+		CURRENTVIEW_TYPE & view.Name
+		iCount = iCount + 1
+	End If
+
+	If iUseDefaults = False Then
+		'Look for customizable views and forms and add to list
+
+		If docExportProfile.HasItem("CustomizableViewList") Then
+			If docExportProfile.CustomizableViewList(0) <> "" Then
+				For x = 0 To UBound(docExportProfile.CustomizableViewList)
+					ReDim Preserve arrExportSources(iCount)
+					arrExportSources(iCount) = "View -- " & docExportProfile.CustomizableViewList(x) & _
+					Space(150) & "$$$" & VIEW_TYPE & docExportProfile.CustomizableViewList(x)
+					iCount = iCount + 1
+				Next
+			End If
+		End If
+
+		If docExportProfile.HasItem("CustomizableFormList") Then
+			If docExportProfile.CustomizableFormList(0) <> "" Then
+				For x = 0 To UBound(docExportProfile.CustomizableFormList)
+					ReDim Preserve arrExportSources(iCount)
+					arrExportSources(iCount) = "Form -- " & docExportProfile.CustomizableFormList(x) & _
+					Space(150) & "$$$" & FORM_TYPE & docExportProfile.CustomizableFormList(x)
+					iCount = iCount + 1
+				Next
+			End If
+		End If
+
+	End If
+
+	'Create new doc for dialog box
+	Set docCustomExport = db.CreateDocument
+
+	'Load choices into dialog box
+	docCustomExport.ExportChooseSourceList = arrExportSources
+
+	'Display Dialog to allow users to pick which source will be used for the export
+	x = w.Dialogbox("(dlgChooseExportSource)", True, True, False, False, False, False, _
+	"Choose Source For Export", docCustomExport, False, False)
+
+	If x <> False Then
+		GetExportSource = CStr(docCustomExport.ExportChooseSource(0))
+	End If
+
+	Print ""
+
+End Function
+Sub TidyUpSpreadsheet()
+	' Format the Excel Header data
+	excelApp.Rows("1:1").AutoFilter
+	excelApp.Rows("1:1").Font.Bold = True
+	excelApp.Windows(1).SplitRow = True
+	excelApp.Windows(1).FreezePanes = True
+	' Format the Excel Cell data
+	excelApp.Cells.Columns.AutoFit
+	excelApp.Cells.Font.Name = "Arial"
+	excelApp.Cells.Font.Size = 8
+	excelApp.Range("A1").Select
+End Sub
+Sub FormatByTab()
+
+	Print "Formatting by sheet..."
+
+	Dim sCellValue As String
+	Dim sLastCellValue As String
+	Dim lngStartRow As Long
+	Dim lngCurrentRow As Long
+	Dim lngEndRow As Long
+	Dim lngEndColumn As Long
+	Dim iSheetNum As Integer
+	Dim myNewSheet As Variant
+	Dim rangeTitles As Variant
+	Dim rangeCopyFrom As Variant
+	Dim rangeNewSheet As Variant
+	Dim sNewName As String
+
+	iSheetNum = 1   'Current Sheet
+	lngStartRow = 2   'Start on row 2, since titles are on row 1
+	lngCurrentRow = lngStartRow
+	sCellValue = excelSheet.Range("A" & CStr(lngCurrentRow)).Text
+	lngEndRow = excelSheet.UsedRange.End(EXCEL_XLDOWN).Row
+	lngEndColumn = iNumColumns
+	Set rangeTitles = excelSheet.Range(excelSheet.Cells(1, 2), excelSheet.Cells(1, lngEndColumn))
+
+    'Loop through each row, if different value found, move to next sheet and
+    'name that sheet the new value.  Continue until the end row is reached.
+
+    'Begin Loop
+	While lngCurrentRow <= lngEndRow
+
+		sLastCellValue = sCellValue
+		sCellValue = excelSheet.Range("A" & CStr(lngCurrentRow)).Text
+
+		If sCellValue <> sLastCellValue Or lngCurrentRow = lngEndRow Then
+
+            	'Create new sheet if it doesn't already exist
+			iSheetNum = iSheetNum + 1
+			If iSheetNum <= 3 Then
+				Set myNewSheet = excelApp.Worksheets(iSheetNum)
+				'myNewSheet.Activate
+			Else
+				Set myNewSheet = excelApp.Worksheets.Add(, excelApp.Worksheets(excelApp.Worksheets.Count), 1, XLWORKSHEET)
+				'myNewSheet.Activate
+			End If
+
+            	'Name first sheet equal to value from previous row
+			sNewName = Left(StripJunk(sLastCellValue), 31)   'Limit 31 char for name
+			If sNewName <> "" Then
+				myNewSheet.Name = sNewName
+			End If
+			'myNewSheet.Visible = XLSHEETVISIBLE
+
+            	'Insert Title Row
+			Set rangeNewSheet = myNewSheet.Range("A1")
+			rangeTitles.Copy rangeNewSheet
+
+            	'Cut contents of range to new sheet
+			Set rangeNewSheet = myNewSheet.Range("A2")
+			Set rangeCopyFrom = excelSheet.Range(excelSheet.Cells(lngStartRow, 2), excelSheet.Cells(lngCurrentRow - 1, lngEndColumn))
+			rangeCopyFrom.Copy rangeNewSheet
+
+           	'Set new Start Row pointer
+			lngStartRow = lngCurrentRow
+
+			'Run formatting on new sheet
+			myNewSheet.Columns.AutoFit
+			myNewSheet.UsedRange.Name = "NOTESDATA"
+
+		End If
+
+		lngCurrentRow = lngCurrentRow + 1
+
+	Wend
+
+    	'Remove excelSheet
+	excelSheet.Delete
+
+End Sub
+Sub BubbleSort(vtList)
+
+	Dim tmpValue As Variant
+	Dim x As Integer, y As Integer
+
+	If UBound(vtList) = 1 Then
+		Exit Sub
+	End If
+
+	For x = 0 To UBound(vtList)
+		For y = (x + 1) To UBound(vtList)
+			On Error Resume Next
+			If vtList(x) > vtList(y) Then
+				tmpValue = vtList(x)
+				vtList(x) = vtList(y)
+				vtList(y) = tmpValue
+			End If
+		Next
+	Next
+
+End Sub
+Function GetExportableViews() As Variant
+
+	'-----------------------------------------------------------------
+	' Prompt user for choice of exportable views.  Any view beginning
+	' with "(Exportable" in its title will be found.  The alias of this
+	' view can be set to allow for a more presentable name of the view.
+	' For example, you might call the view "(Exportable Contacts)" with
+	' an alias of "Contacts".  The word Contacts will appear to the user
+	' as the name of the customizable view.
+	'
+	' If no views are found, the script ends and the user is prompted
+	' to not choose Customizable view
+	'
+	' This script returns the NotesView chosen by the user.
+	'-----------------------------------------------------------------
+
+	Print "Finding Exportable Views..."
+
+	Const VIEW_TYPE = "1"
+	Dim arrExportViews() As String
+	Dim sName As String
+
+	'Search database for customizable export views
+	iCount = 0
+	ForAll v In db.Views
+		If Left(v.Name, 11) = "(Exportable" Then
+			ReDim Preserve arrExportViews(iCount)
+
+			'Get alias name if it exists, otherwise use view title.
+			If IsEmpty(v.Aliases) Then
+				sName = v.Name
+			Else
+				sName = v.Aliases(0)
+			End If
+
+			arrExportViews(iCount) = "View -- " & sName & Space(150) & "$$$" & VIEW_TYPE & sName
+			iCount = iCount + 1
+
+		End If
+	End ForAll
+
+	GetExportableViews = arrExportViews
+
+	Print ""
+
+End Function
+Function GetColumnsFromSource() As Variant
+
+	Dim arrColumns() As Variant
+
+	Select Case sSourceType
+	Case CURRENTVIEW_TYPE, VIEW_TYPE:
+
+		'Get Array of All Columns, but exclude any columns
+		'that have a formula equal to "".
+		iCount = 0
+		For x = 0 To UBound(view.Columns)
+			If IsUIColumn(view.Columns(x)) Then
+			'Don't include this column
+			Else
+			'Include the column
+				ReDim Preserve arrColumns(iCount)
+				Set arrColumns(iCount) = view.Columns(x)
+				iCount = iCount + 1
+			End If
+		Next
+		GetColumnsFromSource = arrColumns
+
+	Case FORM_TYPE:
+
+		iCount = 0
+		For x = 0 To UBound(form.Fields)
+			'Include the field as a column choice
+			ReDim Preserve arrColumns(iCount)
+			arrColumns(iCount) = form.Fields(x)
+			iCount = iCount + 1
+
+		Next
+		GetColumnsFromSource = arrColumns
+
+	End Select
+
+End Function
+Function GetColumnTypes(view As NotesView) As Variant
+
+	'----------------------------------------------------------------
+	' Returns a variant that contains a 1 or 0 for each column
+	'
+	' 1 - the column is visible and should be exported.
+	' 0 - the column is hidden and should not be exported.
+	'----------------------------------------------------------------
+
+	Dim vtColumnTypes()
+	Dim iCount As Integer
+	Dim iNumColumns As Integer
+	iNumColumns = UBound(view.Columns)
+	ReDim vtColumnTypes(iNumColumns)
+
+	iCount = 0
+	ForAll col In view.Columns
+		If col.Ishidden Or col.IsIcon Then
+			vtColumnTypes(iCount) = 0    'set to not export column
+		Else
+			vtColumnTypes(iCount) = 1    'set to export
+		End If
+		iCount = iCount + 1
+	End ForAll
+
+	GetColumnTypes = vtColumnTypes()
+
+End Function
+Sub FormatByGroup()
+
+	Print "Formatting by group..."
+
+	Dim sCellValue As String
+	Dim sLastCellValue As String
+	Dim lngRow As Long
+	Dim lngEndRow As Long
+	Dim iLastColumn As Integer
+
+	If iTabFirstColumn Then
+		iLastColumn = iNumColumns - 1
+	Else
+		iLastColumn = iNumColumns
+	End If
+	iCount = 0
+
+	ForAll sheet In excelApp.Worksheets
+
+		Call sheet.Activate
+
+		If sheet.UsedRange.Cells.Count > 1 Then  'Skip empty sheets
+
+			iCount = iCount + 1
+			Print "Formatting by group... (Sheet " & CStr(iCount) & " of " & CStr(excelApp.Worksheets.Count) & ")"
+
+			lngEndRow = sheet.UsedRange.Rows.Count
+
+   			'Start on row 2, since titles are on row 1
+			sCellValue = ""
+			sLastCellValue = ""
+			lngRow = 2
+
+   			'Begin Loop
+			While lngRow <= lngEndRow
+				sLastCellValue = sCellValue
+				sCellValue = sheet.Range("A" & CStr(lngRow)).Text
+				Call sheet.Range("A" & CStr(lngRow)).Clear
+
+				If sCellValue <> sLastCellValue Then
+
+					sheet.Range(sheet.Cells(CStr(lngRow), 1), sheet.Cells(CStr(lngRow), iLastColumn)).Select
+					excelApp.Selection.Insert (EXCEL_XLDOWN)
+					excelApp.Selection.Interior.ColorIndex = 15
+					excelApp.Selection.Interior.Pattern = EXCEL_XLSOLID
+					excelApp.Selection.Font.Bold = True
+					sheet.Range("A" & CStr(lngRow)).Value = sCellValue
+
+					lngRow = lngRow + 2
+					lngEndRow = lngEndRow + 1
+
+				Else
+
+					lngRow = lngRow + 1
+
+				End If
+
+			Wend
+
+		End If
+
+	End ForAll
+
+	'Activate sheet
+	Call excelApp.Worksheets(1).Activate
+
+End Sub
+Function IsUIColumn(vtTestColumn As Variant) As Integer
+
+	'-----------------------------------------------------------------
+	' Function to return True/False whether column formula is considered
+	' a UI only one.
+	'
+	' The DoExport routine uses the ColumnValues property of the NotesViewEntry
+	' which does not return any values for columns with UI only formulas, such
+	' as @IsExpandable and @DocNumber
+	'
+	' We use the Columns property of the View to return all the columns in
+	' the view we are going to export.  Mainly this is needed to gain access
+	' to the titles of the columns for the export, as well as being vital to
+	' allowing users to customize the export.  Then, in script, we need to remove
+	' any columns that won't be returned by the ColumnValues property, by
+	' checking each in this function.
+	'
+	' In future version of Lotus Notes, Lotus may add new UI only functions
+	' which will need to be added to the list we check.  That can be done by
+	' adding another element in the arrUIFormula array used below.
+	'-----------------------------------------------------------------
+
+	IsUIColumn = False
+
+	Dim arrUIFormula(6) As String
+	Dim sTestFormula As String
+	Dim z As Integer
+
+	'List of UI formulas that won't be picked up by ColumnValues property
+	'as taken from Notes Designer Help document named
+	'"Formulas that look for values in columns and views"
+	arrUIFormula(0) = "@IsExpandable"
+	arrUIFormula(1) = "@DocNumber"
+	arrUIFormula(2) = "@DocChildren"
+	arrUIFormula(3) = "@DocDescendants"
+	arrUIFormula(4) = "@DocParentNumber"
+	arrUIFormula(5) = "@DocSiblings"
+	arrUIFormula(6) = "@IsCategory"
+	sTestFormula = vtTestColumn.Formula
+
+	'Test for any UI only formulas
+	For z = 0 To UBound(arrUIFormula)
+		If InStr(1, sTestFormula, arrUIFormula(z), 5) <> 0 Then
+			'If we find a UI only formula in the column, exit the
+			'function and return true so the export script won't attempt
+			'to use that column.
+			IsUIColumn = True
+			Exit Function
+		End If
+	Next
+
+	'Test for a constant value that will be ignored by column search used by
+	'ColumnValues property.
+	If vtTestColumn.IsFormula And InStr(1, sTestFormula, "@", 5) = 0 And _
+	InStr(1, sTestFormula, "+", 5) = 0 Then
+		'Possibly is a constant-value column formula.  If so, the ColumnValues
+		'property will ignore it.
+		'
+		'To avoid this, we tested that the column value is a formula, thus
+		'ruling out a field only column formula.  Also, we tested for the
+		'existance of an @ symbol or a + symbol which should most of the time
+		'mean that the formula is not a constant-value.  The only cases that
+		'are likely to result in true are cases where the column formula is
+		'equal to a single string, such as "String".  In this case we'll set
+		'IsUIColumn to true because the ColumnValues property will ignore it.
+		'
+		'Likely the worst case is that the column is considered a UI only
+		'column and its title is not exported, but the data will still be
+		'exported in the DoExport routine because the ColumnValues property
+		'will return it.  In that case, the titles in the spreadsheet will be
+		'skewed, but at least the application won't crash.
+
+		IsUIColumn = True
+		Exit Function
+	End If
+
+End Function
+Sub GetExportOptions()
+
+	sMultiValueSeparator = MULTI_VALUE_SEPARATOR
+	dWorksheetRowHeight = SHEET_ROWHEIGHT
+	dMaximumColumnWidth = MAX_COLUMN_WIDTH
+	iPromptForSelectedExportType = PROMPT_FOR_SELECTED_EXPORT_TYPE
+
+	Set docExportProfile = db.GetProfileDocument("Export Profile")
+	If docExportProfile Is Nothing Then iUseDefaults = True Else iUseDefaults = False
+
+	'Get Options
+	If Not iUseDefaults Then
+
+		If docExportProfile.HasItem("MultipleValueSeparator") Then
+			sMultiValueSeparator = docExportProfile.MultipleValueSeparator(0)
+		End If
+
+		If docExportProfile.HasItem("WorksheetRowHeight") Then
+			dWorksheetRowHeight = docExportProfile.WorksheetRowHeight(0)
+		End If
+
+		If docExportProfile.HasItem("MaximumColumnWidth") Then
+			dMaximumColumnWidth = docExportProfile.MaximumColumnWidth(0)
+		End If
+
+		If docExportProfile.HasItem("PromptForSelectedExportType") Then
+			If docExportProfile.PromptForSelectedExportType(0) = "1" Then
+				iPromptForSelectedExportType = True
+			End If
+		End If
+
+	End If
+
+End Sub
+Function CustomizeExport() As Variant
+
+	'------------------------------------------------------------------
+	' Presents user with a dialog box where he/she can choose what fields
+	' are going to be exported and in what order.
+	'
+	' The field names are taken from the name of each column in the view.
+	'------------------------------------------------------------------
+
+	Dim docCustomExport As NotesDocument
+	Dim iHasCategories As Integer
+
+	iTabFirstColumn = False
+	iGroupFirstColumn = False
+
+	'Create new doc for dialog box
+	Set docCustomExport = db.CreateDocument
+
+	'Load dialog box with column names and order
+	ReDim arrColumnNames(UBound(vtColumns))
+
+	Select Case sSourceType
+	Case CURRENTVIEW_TYPE, VIEW_TYPE:
+
+		For x = 0 To UBound(vtColumns)
+
+			If vtColumns(x).Title = "" Then
+				arrColumnNames(x) = "Column" & CStr(x) & Space(150) & "$$$" & CStr(x)
+			Else
+			'Begin CHARM only code (should not be included in version for Iris Sandbox)
+			'Check if column title should be calculated rather than taken from view
+				If LCase(Left(vtColumns(x).Title, 7)) = "lookup=" Then
+
+				'If all else fails, make sure dialog box gets default column title
+					arrColumnNames(x) = "UDF Column" & CStr(x) & Space(150) & "$$$" & CStr(x)
+
+				'Try to perform lookup as described by column title
+				'Format should be Lookup=<name of profile document>;<name of field>
+					Dim docProfile As NotesDocument
+					Dim sTitle As String
+					Dim itemLookup As NotesItem
+					sTitle = Right(vtColumns(x).Title, Len(vtColumns(x).Title) - 7)
+					Set docProfile = db.GetProfileDocument(StrLeft(sTitle, ";"))
+					If Not docProfile Is Nothing Then
+						Set itemLookup = docProfile.Getfirstitem(StrRight(sTitle, ";"))
+						If Not itemLookup Is Nothing Then
+							arrColumnNames(x) = itemLookup.Text & Space(150) & "$$$" & CStr(x)
+						End If
+					End If
+
+				Else
+			'End CHARM only code
+					arrColumnNames(x) = vtColumns(x).Title & Space(150) & "$$$" & CStr(x)
+				End If
+			End If
+		Next
+
+	Case FORM_TYPE:
+
+		Call BubbleSort(vtColumns)
+		For x = 0 To UBound(vtColumns)
+			arrColumnNames(x) = vtColumns(x) & Space(50) & "$$$" & CStr(x)
+		Next
+
+	End Select
+
+
+	'Set Listbox Fields
+	docCustomExport.ExportSourceListData = arrColumnNames
+	docCustomExport.ExportSelectListData = ""
+
+	'Display Dialog to allow users to choose columns, column order
+	'and sort order.
+	x = w.Dialogbox("(dlgCustomExport)", True, True, False, False, False, False, _
+	"Choose Fields For Export", docCustomExport, False, False)
+	If x = False Then Exit Function
+
+	'Return Column Order
+	Dim arrColumnOrder() As Integer
+	ReDim arrColumnOrder(UBound(docCustomExport.ExportColumnOrder))
+	For x = 0 To UBound(arrColumnOrder)
+		arrColumnOrder(x) = CInt(docCustomExport.ExportColumnOrder(x))
+	Next
+
+	'Check for categorized columns.  If they exist, set flag to prevent
+	'sorting from occuring.  Since categorized columns get exported to
+	'their own row, a sort will cause all the categories to sort to the
+	'bottom or top and they won't visually match up to the row they
+	'belong to.
+	If sSourceType = CURRENTVIEW_TYPE Or sSourceType = VIEW_TYPE Then
+		iHasCategories = False
+		For x = 0 To UBound(arrColumnOrder)
+			If vtColumns(arrColumnOrder(x)).IsCategory Then
+				iHasCategories = True
+			End If
+		Next
+	End If
+
+	'Assign sort column number if appropriate
+	'Disable sort by default
+	iNumSortColumns = 0
+
+	'If first sort field is not blank, then set first sort field
+	If docCustomExport.ExportSortBy1(0) <> "" Then
+		iNumSortColumns = 1
+		iSortBy1 = CInt(ArrayGetIndex(docCustomExport.ExportSelectListData, docCustomExport.ExportSortBy1(0)) + 1)
+	Else
+		'Else, if tab by or group by are turned on, use first column as sort column
+		If (docCustomExport.ExportTabFirstColumn(0) = "1" Or docCustomExport.ExportGroupFirstColumn(0) = "1") Then
+			iNumSortColumns = 1
+			iSortBy1 = 1
+		End If
+	End If
+
+	'If second sort field is not blank, or both tab by and group by are turned on, then set second sort field
+	If docCustomExport.ExportSortBy2(0) <> "" Then
+		iSortBy2 = CInt(ArrayGetIndex(docCustomExport.ExportSelectListData, docCustomExport.ExportSortBy2(0)) + 1)
+		iNumSortColumns = 2
+	Else
+		'Else, if both tab by and group by are turned on, use second column as sort column
+		If (docCustomExport.ExportTabFirstColumn(0) = "1" And docCustomExport.ExportGroupFirstColumn(0) = "1") Then
+			iNumSortColumns = 2
+			iSortBy2 = 2
+		End If
+	End If
+
+	'Turn on third sort field if set.
+	If docCustomExport.ExportSortBy3(0) <> "" Then
+		iSortBy3 = CInt(ArrayGetIndex(docCustomExport.ExportSelectListData, docCustomExport.ExportSortBy3(0)) + 1)
+		iNumSortColumns = 3
+	End If
+
+	'If TabFirstColumn field is checked, set flag
+	If docCustomExport.ExportTabFirstColumn(0) = "1" Then
+		iTabFirstColumn = True
+	End If
+
+	'If GroupFirstColumn field is checked, set flag
+	If docCustomExport.ExportGroupFirstColumn(0) = "1" Then
+		iGroupFirstColumn = True
+	End If
+
+	CustomizeExport = arrColumnOrder
+
+End Function
+Sub UpdateStatusBar(x As Long, total As Long)
+	Print "Exporting Data... " & x & " of " & total & " (" & (Round((x / total), 2)*100) & "%)"
+End Sub
+Function CreateExcelObject() As Integer
+
+	Dim sMessage As String
+
+	'Assume it worked
+	CreateExcelObject = True
+
+	'Create Excel Object
+	Print "Starting Export..."
+	Set excelApp = CreateObject("Excel.Application")
+	If excelApp Is Nothing Then
+		sMessage = "Could not create spreadsheet." & Chr$( 10 ) & _
+		"Make sure Excel is installed on this computer."
+		MsgBox sMessage, 16, "Creation of Spreadsheet Object Failed"
+		CreateExcelObject = False
+		Exit Function
+	End If
+
+	'excelApp.DisplayAlerts = False
+	Set excelNewWkbk = excelApp.Workbooks.Add
+	Set excelSheet = excelNewWkbk.ActiveSheet
+
+End Function
